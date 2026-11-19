@@ -1,0 +1,37 @@
+# crm-core is a library module (imported via replace => ../crm-core); nothing
+# here is built into a binary, but keep local artefacts out of git.
+
+# Environment files — NEVER COMMIT
+.env
+.env.*
+*.env
+
+# Go build / test output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+/bin/
+/tmp/
+
+# Local SQLite files from tests or experiments
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+
+# Workspace file (a root go.work breaks erp-api-v2 builds)
+go.work
+go.work.sum
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
