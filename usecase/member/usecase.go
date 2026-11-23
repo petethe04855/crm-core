@@ -46,13 +46,29 @@ type Usecase interface {
 }
 
 type usecase struct {
-	members domainmember.Repository
-	tiers   domainloyalty.TierRepository
+	members  domainmember.Repository
+	tiers    domainloyalty.TierRepository
+	unlinked UnlinkNotifier
 }
 
+// UnlinkNotifier is told after staff unlink a LINE account (rich menu reset).
+type UnlinkNotifier interface {
+	Unlinked(ctx context.Context, lineUserID string, memberID uint) error
+}
+
+// Option customizes the usecase.
+type Option func(*usecase)
+
+// WithUnlinkNotifier resets the LINE rich menu after an unlink.
+func WithUnlinkNotifier(n UnlinkNotifier) Option { return func(u *usecase) { u.unlinked = n } }
+
 // New builds the member usecase.
-func New(members domainmember.Repository, tiers domainloyalty.TierRepository) Usecase {
-	return &usecase{members: members, tiers: tiers}
+func New(members domainmember.Repository, tiers domainloyalty.TierRepository, opts ...Option) Usecase {
+	u := &usecase{members: members, tiers: tiers}
+	for _, opt := range opts {
+		opt(u)
+	}
+	return u
 }
 
 var validStatuses = map[string]bool{

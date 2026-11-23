@@ -100,6 +100,12 @@ type Usecase interface {
 	ExpireDue(ctx context.Context, now time.Time) (int64, error)
 
 	Holders(ctx context.Context, q domaincoupon.HolderQuery) ([]domaincoupon.Holder, int64, error)
+
+	// Available lists the coupons a member can see in the LINE app: active
+	// templates open for claiming, with whether this member can claim now.
+	Available(ctx context.Context, memberID uint, at time.Time) ([]AvailableCoupon, error)
+	// MemberCoupons lists a member's own coupons (status "" = all).
+	MemberCoupons(ctx context.Context, memberID uint, status string, page, limit int) ([]MemberCouponView, int64, error)
 	ExportHolders(ctx context.Context, couponID uint) ([]domaincoupon.Holder, error)
 }
 
@@ -648,4 +654,111 @@ func sameFloat(a, b *float64) bool {
 		return a == nil && b == nil
 	}
 	return *a == *b
+}
+
+// AvailableCoupon is a template shown in the LINE app.
+type AvailableCoupon struct {
+	Coupon domaincoupon.Coupon
+	Held   int64 // this member's active (available) claims
+	// CanClaim / Reason: why the claim button is off ("limit", "tier", "").
+	CanClaim bool
+	Reason   string
+}
+
+// MemberCouponView is a member's coupon with its template.
+type MemberCouponView struct {
+	Holder domaincoupon.MemberCoupon
+	Coupon domaincoupon.Coupon
+	// DisplayCode is what the member shows: the shared code for shared
+	// templates, the unique code otherwise.
+	DisplayCode string
+}
+
+// Coupon "reasons" for Available.
+const (
+	ReasonLimit = "limit"
+	ReasonTier  = "tier"
+)
+
+func (u *usecase) Available(ctx context.Context, memberID uint, at time.Time) ([]AvailableCoupon, error) {
+	if at.IsZero() {
+		at = u.now()
+	}
+	member, err := u.members.FindByID(ctx, memberID)
+	if err != nil {
+		return nil, err
+	}
+	if member.Status != domainmember.StatusActive {
+		return nil, domain.ErrMemberNotAllowed
+	}
+	var out []AvailableCoupon
+	for page := 1; ; page++ {
+		rows, total, err := u.coupons.FindAll(ctx, domaincoupon.Query{Status: domaincoupon.StatusActive, Page: page, Limit: 100})
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range rows {
+			if claimable(c, at) != nil {
+				continue // closed, expired or out of quota: not shown
+			}
+			item := AvailableCoupon{Coupon: c, CanClaim: true}
+			if err := u.checkTier(ctx, c, *member); err != nil {
+				if !errors.Is(err, domaincoupon.ErrTierTooLow) {
+					return nil, err
+				}
+				item.CanClaim, item.Reason = false, ReasonTier
+			}
+			held, err := u.coupons.CountActiveClaims(ctx, c.ID, member.ID)
+			if err != nil {
+				return nil, err
+			}
+			item.Held = held
+			if item.CanClaim && held >= int64(c.LimitPerMember) {
+				item.CanClaim, item.Reason = false, ReasonLimit
+			}
+			out = append(out, item)
+		}
+		if int64(page*100) >= total || len(rows) == 0 {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (u *usecase) MemberCoupons(ctx context.Context, memberID uint, status string, page, limit int) ([]MemberCouponView, int64, error) {
+	if memberID == 0 {
+		return nil, 0, domain.NewValidationError("memberId", "is required")
+	}
+	switch status {
+	case "", domaincoupon.HolderAvailable, domaincoupon.HolderUsed, domaincoupon.HolderExpired, domaincoupon.HolderCancelled:
+	default:
+		return nil, 0, domain.NewValidationError("status", "unknown coupon status")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	holders, total, err := u.coupons.FindHolders(ctx, domaincoupon.HolderQuery{MemberID: memberID, Status: status, Page: page, Limit: limit})
+	if err != nil {
+		return nil, 0, err
+	}
+	templates := map[uint]*domaincoupon.Coupon{}
+	out := make([]MemberCouponView, 0, len(holders))
+	for _, h := range holders {
+		c, ok := templates[h.CouponID]
+		if !ok {
+			if c, err = u.coupons.FindByID(ctx, h.CouponID); err != nil {
+				return nil, 0, err
+			}
+			templates[h.CouponID] = c
+		}
+		code := h.Code
+		if c.CodeType == domaincoupon.CodeShared && c.SharedCode != "" {
+			code = c.SharedCode
+		}
+		out = append(out, MemberCouponView{Holder: h.MemberCoupon, Coupon: *c, DisplayCode: code})
+	}
+	return out, total, nil
 }

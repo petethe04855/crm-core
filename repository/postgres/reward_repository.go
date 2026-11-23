@@ -145,6 +145,26 @@ func (r *rewardRepository) Update(ctx context.Context, rw *domainreward.Reward) 
 	return r.db.WithContext(ctx).Save(rw).Error
 }
 
+func (r *rewardRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var n int64
+		if err := tx.Model(&domainreward.Redemption{}).Where("reward_id = ?", id).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return domain.ErrConflict
+		}
+		res := tx.Delete(&domainreward.Reward{}, id)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return notFound(gorm.ErrRecordNotFound)
+		}
+		return nil
+	})
+}
+
 func (r *rewardRepository) ActiveSKUs(ctx context.Context) ([]domainreward.SKUWarehouse, error) {
 	var rows []struct {
 		ERPSKUID       uint `gorm:"column:erp_sku_id"`
@@ -222,6 +242,14 @@ func (r *rewardRepository) CreateRedemption(ctx context.Context, rd *domainrewar
 		return conflictOn(err)
 	}
 	return nil
+}
+
+func (r *rewardRepository) FindRedemptionByKey(ctx context.Context, memberID uint, key string) (*domainreward.Redemption, error) {
+	var rd domainreward.Redemption
+	if err := r.db.WithContext(ctx).Where("member_id = ? AND idempotency_key = ?", memberID, key).First(&rd).Error; err != nil {
+		return nil, notFound(err)
+	}
+	return &rd, nil
 }
 
 func (r *rewardRepository) UpdateRedemption(ctx context.Context, rd *domainreward.Redemption) error {

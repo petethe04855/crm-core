@@ -2,8 +2,11 @@ package reward
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +25,23 @@ type RedeemRequest struct {
 	RewardID uint
 	At       time.Time
 	Address  Address
+	// IdempotencyKey (optional, ≤64 of A-Z a-z 0-9 - _) makes retries safe:
+	// the same member + key returns the first redemption.
+	IdempotencyKey string
+}
+
+func validKey(k string) bool {
+	if len(k) == 0 || len(k) > 64 {
+		return false
+	}
+	for _, c := range k {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Address is the shipping address snapshot.
@@ -89,6 +109,20 @@ func (u *usecase) Redeem(ctx context.Context, req RedeemRequest) (*domainreward.
 	if err := req.Address.validate(); err != nil {
 		return nil, err
 	}
+	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
+	if req.IdempotencyKey != "" {
+		if !validKey(req.IdempotencyKey) {
+			return nil, domain.NewValidationError("idempotencyKey", "must be 1-64 letters, digits, - or _")
+		}
+		if prev, err := u.rewards.FindRedemptionByKey(ctx, req.MemberID, req.IdempotencyKey); err == nil {
+			if prev.RewardID != req.RewardID {
+				return nil, domain.NewValidationError("idempotencyKey", "was used for another reward")
+			}
+			return prev, nil
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return nil, err
+		}
+	}
 	at := req.At
 	if at.IsZero() {
 		at = u.now()
@@ -142,9 +176,16 @@ func (u *usecase) Redeem(ctx context.Context, req RedeemRequest) (*domainreward.
 		}
 
 		a := req.Address
+		var key *string
+		if req.IdempotencyKey != "" {
+			k := req.IdempotencyKey
+			key = &k
+		}
 		rd := &domainreward.Redemption{
+			IdempotencyKey: key,
 			// Placeholder until the id is known; replaced in this transaction.
-			RedemptionNo: fmt.Sprintf("TMP%d", time.Now().UnixNano()%1e15),
+			// Random, not time-based: the clock can repeat for two redemptions.
+			RedemptionNo: placeholderNo(),
 			MemberID:     req.MemberID, RewardID: rw.ID, Qty: rw.QtyPerRedemption, Points: rw.PointsCost,
 			Status:   domainreward.RedemptionPending,
 			ShipName: strings.TrimSpace(a.Name), ShipPhone: strings.TrimSpace(a.Phone),
@@ -176,7 +217,18 @@ func (u *usecase) Redeem(ctx context.Context, req RedeemRequest) (*domainreward.
 		return nil
 	})
 	if err != nil {
+		// Two taps with the same key raced: the loser returns the winner's row.
+		if req.IdempotencyKey != "" && errors.Is(err, domain.ErrConflict) {
+			if prev, ferr := u.rewards.FindRedemptionByKey(ctx, req.MemberID, req.IdempotencyKey); ferr == nil {
+				return prev, nil
+			}
+		}
 		return nil, err
+	}
+	if u.notify != nil {
+		if err := u.notify.RedemptionCreated(ctx, out.MemberID, out.RedemptionNo, out.RewardName, out.Points); err != nil {
+			log.Printf("[WARN] LINE notify redemption %s: %v", out.RedemptionNo, err)
+		}
 	}
 	return out, nil
 }
@@ -298,10 +350,16 @@ func (u *usecase) Ship(ctx context.Context, actor domain.Actor, id uint, trackin
 			return nil, err
 		}
 	}
-	return u.move(ctx, actor, id, domainreward.RedemptionShipped, []string{domainreward.RedemptionPacking},
+	shipped, err := u.move(ctx, actor, id, domainreward.RedemptionShipped, []string{domainreward.RedemptionPacking},
 		func(rd *domainreward.Redemption, now time.Time) {
 			rd.ShippedAt, rd.TrackingNo, rd.StockIssueRef = &now, trackingNo, ref
 		})
+	if err == nil && u.notify != nil {
+		if nerr := u.notify.RedemptionShipped(ctx, shipped.MemberID, shipped.RedemptionNo, shipped.RewardName, shipped.TrackingNo); nerr != nil {
+			log.Printf("[WARN] LINE notify shipped %s: %v", shipped.RedemptionNo, nerr)
+		}
+	}
+	return shipped, err
 }
 
 // Cancel refunds the points and frees the quota. After shipping a redemption
@@ -353,4 +411,11 @@ func (u *usecase) Cancel(ctx context.Context, actor domain.Actor, id uint, reaso
 		return nil, err
 	}
 	return out, nil
+}
+
+// placeholderNo is a unique temporary redemption_no (TMP + 16 hex chars).
+func placeholderNo() string {
+	var buf [8]byte
+	_, _ = rand.Read(buf[:]) // crypto/rand never fails on supported platforms
+	return "TMP" + hex.EncodeToString(buf[:])
 }

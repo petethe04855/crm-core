@@ -70,9 +70,14 @@ type Usecase interface {
 
 	List(ctx context.Context, q domainreward.Query) ([]View, int64, error)
 	Get(ctx context.Context, id uint) (*View, error)
+	// Catalog is the LINE catalogue: active rewards open at `at` with stock
+	// left (search / category / page apply).
+	Catalog(ctx context.Context, q domainreward.Query, at time.Time) ([]View, int64, error)
 	Create(ctx context.Context, actor domain.Actor, in Input) (*View, error)
 	Update(ctx context.Context, actor domain.Actor, id uint, in Input) (*View, error)
 	SetStatus(ctx context.Context, actor domain.Actor, id uint, status string) (*View, error)
+	// Delete removes a reward nobody has redeemed (otherwise archive it).
+	Delete(ctx context.Context, id uint) error
 	SyncStock(ctx context.Context) (int, error)
 
 	Redeem(ctx context.Context, req RedeemRequest) (*domainreward.Redemption, error)
@@ -92,14 +97,31 @@ type usecase struct {
 	tiers   domainloyalty.TierRepository
 	points  Points
 	erp     domainreward.ERP
+	notify  Notifier
 	now     func() time.Time
 }
+
+// Notifier receives redemption events after they committed (LINE messages).
+type Notifier interface {
+	RedemptionCreated(ctx context.Context, memberID uint, redemptionNo, rewardName string, points int64) error
+	RedemptionShipped(ctx context.Context, memberID uint, redemptionNo, rewardName, trackingNo string) error
+}
+
+// Option customizes the usecase.
+type Option func(*usecase)
+
+// WithNotifier sends redemption events to the member (best effort).
+func WithNotifier(n Notifier) Option { return func(u *usecase) { u.notify = n } }
 
 // New builds the reward usecase. erp may be nil (no integration token): stock
 // sync is then skipped and shipping fails with ErrERPUnavailable.
 func New(rewards domainreward.Repository, uow domainreward.UnitOfWork, members domainmember.Repository,
-	tiers domainloyalty.TierRepository, points Points, erp domainreward.ERP) Usecase {
-	return &usecase{rewards: rewards, uow: uow, members: members, tiers: tiers, points: points, erp: erp, now: time.Now}
+	tiers domainloyalty.TierRepository, points Points, erp domainreward.ERP, opts ...Option) Usecase {
+	u := &usecase{rewards: rewards, uow: uow, members: members, tiers: tiers, points: points, erp: erp, now: time.Now}
+	for _, opt := range opts {
+		opt(u)
+	}
+	return u
 }
 
 // RemainingQuota is how many more redemptions the reward allows (plan §5.3):
@@ -418,6 +440,19 @@ func (u *usecase) SetStatus(ctx context.Context, actor domain.Actor, id uint, st
 	return u.Get(ctx, r.ID)
 }
 
+// Delete removes a reward that was never redeemed; one with redemptions is
+// kept for the history and answers domain.ErrConflict (archive it instead).
+func (u *usecase) Delete(ctx context.Context, id uint) error {
+	r, err := u.rewards.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if r.RedeemedCount > 0 {
+		return domain.ErrConflict
+	}
+	return u.rewards.Delete(ctx, id)
+}
+
 // SyncStock refreshes the cache for every active reward SKU. When the ERP is
 // down the old values stay (they are only shown as stale).
 func (u *usecase) SyncStock(ctx context.Context) (int, error) {
@@ -449,4 +484,40 @@ func (u *usecase) SyncStock(ctx context.Context) (int, error) {
 		synced += len(rows)
 	}
 	return synced, nil
+}
+
+// Catalog lists what a member can redeem now. The catalogue is small, so all
+// active rewards are read (pages of maxLimit) and filtered before paging.
+func (u *usecase) Catalog(ctx context.Context, q domainreward.Query, at time.Time) ([]View, int64, error) {
+	page, limit := q.Page, q.Limit
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > maxLimit {
+		limit = defaultLimit
+	}
+	var open []View
+	for p := 1; ; p++ {
+		rows, total, err := u.List(ctx, domainreward.Query{
+			Search: q.Search, CategoryID: q.CategoryID, Status: domainreward.StatusActive, Page: p, Limit: maxLimit,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, v := range rows {
+			if u.open(v.Reward, at) == nil && v.RemainingQuota > 0 {
+				open = append(open, v)
+			}
+		}
+		if int64(p*maxLimit) >= total || len(rows) == 0 {
+			break
+		}
+	}
+	total := int64(len(open))
+	start := (page - 1) * limit
+	if start >= len(open) {
+		return []View{}, total, nil
+	}
+	end := min(start+limit, len(open))
+	return open[start:end], total, nil
 }

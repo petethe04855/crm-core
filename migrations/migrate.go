@@ -30,6 +30,10 @@ func Models() []any {
 	all = append(all, couponModels()...)
 	all = append(all, earnRuleModels()...)
 	all = append(all, rewardModels()...)
+	all = append(all, consentModels()...)
+	all = append(all, productCodeModels()...)
+	all = append(all, lineMessagingModels()...)
+	all = append(all, privacyModels()...)
 	return all
 }
 

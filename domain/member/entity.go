@@ -33,10 +33,13 @@ type Member struct {
 	EmailVerifiedAt *time.Time
 	PhoneE164       *string    `gorm:"size:20;index"`
 	BirthDate       *time.Time `gorm:"type:date"`
-	Gender          string     `gorm:"size:20;not null;default:unspecified"`
-	TierID          uint       `gorm:"index;not null"`
-	PointBalance    int64      `gorm:"not null;default:0"`
-	LifetimeSpend   float64    `gorm:"type:numeric(14,2);not null;default:0"`
+	// BirthDateChangedAt is set the one time a member corrects their birth
+	// date (birthday bonuses depend on it, so it is not freely editable).
+	BirthDateChangedAt *time.Time
+	Gender             string  `gorm:"size:20;not null;default:unspecified"`
+	TierID             uint    `gorm:"index;not null"`
+	PointBalance       int64   `gorm:"not null;default:0"`
+	LifetimeSpend      float64 `gorm:"type:numeric(14,2);not null;default:0"`
 	// CustomerID references a customer in the ERP database (no cross-DB FK).
 	CustomerID        *uint  `gorm:"index"`
 	Status            string `gorm:"size:20;not null;default:active;index"`
@@ -111,4 +114,16 @@ type Repository interface {
 	RemoveTag(ctx context.Context, memberID uint, tag string) error
 	FindNotes(ctx context.Context, memberID uint, page, limit int) ([]MemberNote, int64, error)
 	AddNote(ctx context.Context, note *MemberNote) error
+}
+
+// IdentityRepository resolves who a LINE user or an email belongs to. The
+// customer-facing auth flow uses it; it is separate from Repository so the
+// backoffice contract stays small.
+type IdentityRepository interface {
+	// FindByLineUserID returns the member and the active LINE link of a LINE
+	// user, or domain.ErrNotFound when the LINE user is not linked.
+	FindByLineUserID(ctx context.Context, lineUserID string) (*Member, *MemberLineAccount, error)
+	FindByID(ctx context.Context, id uint) (*Member, error)
+	// FindByEmail matches the normalized (lowercase, trimmed) email.
+	FindByEmail(ctx context.Context, email string) (*Member, error)
 }

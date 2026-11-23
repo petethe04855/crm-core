@@ -2,6 +2,7 @@ package member
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -49,7 +50,16 @@ func (u *usecase) UnlinkLine(ctx context.Context, actor domain.Actor, id uint) e
 	if _, err := u.members.FindByID(ctx, id); err != nil {
 		return err
 	}
-	return u.members.UnlinkActiveLineAccount(ctx, id)
+	acc, _ := u.members.FindActiveLineAccount(ctx, id)
+	if err := u.members.UnlinkActiveLineAccount(ctx, id); err != nil {
+		return err
+	}
+	if acc != nil && u.unlinked != nil {
+		if err := u.unlinked.Unlinked(ctx, acc.LineUserID, id); err != nil {
+			log.Printf("[WARN] LINE rich menu reset for member %d: %v", id, err)
+		}
+	}
+	return nil
 }
 
 // Tags lists a member's backoffice tags.

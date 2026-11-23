@@ -10,6 +10,8 @@ import (
 
 	domainmember "crm-core/domain/member"
 	domainpoints "crm-core/domain/points"
+
+	"gorm.io/gorm/schema"
 )
 
 // Reward types. Only physical rewards are supported in the first round.
@@ -115,19 +117,25 @@ type StockCache struct {
 	SyncedAt       time.Time `gorm:"not null"`
 }
 
-// TableName keeps the plural convention for the cache table.
-func (StockCache) TableName() string { return "reward_stock_caches" }
+// TableName names the cache table reward_stock_caches through the naming
+// strategy, so it gets the same schema prefix as every other CRM table
+// (crm.reward_stock_caches on Postgres, unprefixed on SQLite). A plain
+// TableName() string would bypass the prefix and land in the public schema.
+func (StockCache) TableName(namer schema.Namer) string { return namer.TableName("RewardStockCache") }
 
 // Redemption is one reward a member redeemed (table crm.redemptions).
 type Redemption struct {
 	ID           uint   `gorm:"primaryKey"`
 	RedemptionNo string `gorm:"size:20;not null;uniqueIndex"`
-	MemberID     uint   `gorm:"not null;index"`
-	RewardID     uint   `gorm:"not null;index"`
-	Qty          int    `gorm:"not null"`
-	Points       int64  `gorm:"not null"`
-	LedgerID     *uint
-	Status       string `gorm:"size:12;not null;index"`
+	MemberID     uint   `gorm:"not null;index;uniqueIndex:ux_redemptions_member_idem,priority:1"`
+	// IdempotencyKey is sent by the LINE app per "redeem" tap: a retry with
+	// the same key returns the first redemption instead of charging again.
+	IdempotencyKey *string `gorm:"size:64;uniqueIndex:ux_redemptions_member_idem,priority:2"`
+	RewardID       uint    `gorm:"not null;index"`
+	Qty            int     `gorm:"not null"`
+	Points         int64   `gorm:"not null"`
+	LedgerID       *uint
+	Status         string `gorm:"size:12;not null;index"`
 
 	// Shipping address snapshot (the member may change theirs later).
 	ShipName     string `gorm:"size:150"`
@@ -204,6 +212,9 @@ type Repository interface {
 	LockByID(ctx context.Context, id uint) (*Reward, error)
 	Create(ctx context.Context, r *Reward) error
 	Update(ctx context.Context, r *Reward) error
+	// Delete removes a reward that has no redemptions (domain.ErrConflict
+	// otherwise, domain.ErrNotFound when missing).
+	Delete(ctx context.Context, id uint) error
 	// ActiveSKUs lists (sku, warehouse) pairs of active physical rewards.
 	ActiveSKUs(ctx context.Context) ([]SKUWarehouse, error)
 
@@ -217,6 +228,8 @@ type Repository interface {
 	FindRedemption(ctx context.Context, id uint) (*Redemption, error)
 	LockRedemption(ctx context.Context, id uint) (*Redemption, error)
 	FindRedemptions(ctx context.Context, q RedemptionQuery) ([]RedemptionRow, int64, error)
+	// FindRedemptionByKey returns the member's redemption with the key, or ErrNotFound.
+	FindRedemptionByKey(ctx context.Context, memberID uint, key string) (*Redemption, error)
 }
 
 // SKUWarehouse identifies one cached stock row.
