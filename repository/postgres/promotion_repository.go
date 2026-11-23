@@ -25,7 +25,14 @@ func (r *promotionRepository) FindAll(ctx context.Context, q domainpromotion.Que
 	tx := r.db.WithContext(ctx).Model(&domainpromotion.Promotion{})
 
 	if q.Status != "" {
-		tx = tx.Where("status = ?", q.Status)
+		switch q.Status {
+		case "public":
+			tx = tx.Where("status = ?", domainpromotion.StatusPublished)
+		case "unpublic":
+			tx = tx.Where("status <> ?", domainpromotion.StatusPublished)
+		default:
+			tx = tx.Where("status = ?", q.Status)
+		}
 	}
 	if q.Placement != "" {
 		tx = tx.Where("placement = ?", q.Placement)

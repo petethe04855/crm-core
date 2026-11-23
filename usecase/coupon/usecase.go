@@ -173,8 +173,8 @@ var monthPattern = regexp.MustCompile(`^\d{4}-(0[1-9]|1[0-2])$`)
 
 func (u *usecase) List(ctx context.Context, q domaincoupon.Query, month string) ([]domaincoupon.Coupon, int64, error) {
 	q = NormalizeQuery(q)
-	if q.Status != "" && !validStatus(q.Status) {
-		return nil, 0, domain.NewValidationError("status", "must be one of draft, active, paused, ended")
+	if q.Status != "" && !validListStatus(q.Status) {
+		return nil, 0, domain.NewValidationError("status", "must be one of public, unpublic, draft, active, paused, ended")
 	}
 	if q.Channel != "" && !validChannel(q.Channel) {
 		return nil, 0, domain.NewValidationError("channel", "must be one of store, line, shopee, tiktok")

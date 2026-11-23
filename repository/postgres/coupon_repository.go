@@ -61,7 +61,14 @@ func forUpdate(tx *gorm.DB) *gorm.DB {
 func (r *couponRepository) FindAll(ctx context.Context, q domaincoupon.Query) ([]domaincoupon.Coupon, int64, error) {
 	tx := r.db.WithContext(ctx).Model(&domaincoupon.Coupon{})
 	if q.Status != "" {
-		tx = tx.Where("status = ?", q.Status)
+		switch q.Status {
+		case "public":
+			tx = tx.Where("status = ?", domaincoupon.StatusActive)
+		case "unpublic":
+			tx = tx.Where("status <> ?", domaincoupon.StatusActive)
+		default:
+			tx = tx.Where("status = ?", q.Status)
+		}
 	}
 	if q.Channel != "" {
 		tx = tx.Where("channel = ?", q.Channel)

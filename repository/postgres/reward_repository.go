@@ -96,7 +96,14 @@ func (r *rewardRepository) FindAll(ctx context.Context, q domainreward.Query) ([
 
 	tx := r.db.WithContext(ctx).Model(&domainreward.Reward{})
 	if q.Status != "" {
-		tx = tx.Where(rTable+".status = ?", q.Status)
+		switch q.Status {
+		case "public":
+			tx = tx.Where(rTable+".status = ?", domainreward.StatusActive)
+		case "unpublic":
+			tx = tx.Where(rTable+".status <> ?", domainreward.StatusActive)
+		default:
+			tx = tx.Where(rTable+".status = ?", q.Status)
+		}
 	}
 	if q.CategoryID != 0 {
 		tx = tx.Where(rTable+".category_id = ?", q.CategoryID)

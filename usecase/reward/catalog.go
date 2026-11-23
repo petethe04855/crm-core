@@ -238,8 +238,8 @@ func (u *usecase) List(ctx context.Context, q domainreward.Query) ([]View, int64
 	if q.Limit > maxLimit {
 		q.Limit = maxLimit
 	}
-	if q.Status != "" && !validStatus(q.Status) {
-		return nil, 0, domain.NewValidationError("status", "must be one of draft, active, inactive, archived")
+	if q.Status != "" && !validListStatus(q.Status) {
+		return nil, 0, domain.NewValidationError("status", "must be one of public, unpublic, draft, active, inactive, archived")
 	}
 	rows, total, err := u.rewards.FindAll(ctx, q)
 	if err != nil {
@@ -290,6 +290,16 @@ func validStatus(s string) bool {
 		return true
 	}
 	return false
+}
+
+// validListStatus accepts the stored lifecycle statuses plus the rewards
+// table's two states: public (active) and unpublic (everything else).
+func validListStatus(s string) bool {
+	switch s {
+	case "public", "unpublic":
+		return true
+	}
+	return validStatus(s)
 }
 
 func normalize(in Input) Input {

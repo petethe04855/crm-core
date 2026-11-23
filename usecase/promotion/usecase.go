@@ -73,6 +73,9 @@ type Usecase interface {
 	Update(ctx context.Context, actor domain.Actor, id string, in Input) (*domainpromotion.Promotion, []string, error)
 	Delete(ctx context.Context, actor domain.Actor, id string) error
 	Publish(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, []string, error)
+	// Unpublish hides a published promotion from the LINE app by moving it back
+	// to draft (the UI calls that state "unpublic").
+	Unpublish(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error)
 	Archive(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error)
 	Duplicate(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error)
 	// ActiveFor is the LINE feed: live promotions of one placement that match
@@ -99,8 +102,8 @@ func New(repo domainpromotion.Repository, checker CTATargetChecker) Usecase {
 
 func (u *usecase) List(ctx context.Context, q ListQuery) ([]domainpromotion.Promotion, int64, error) {
 	q = NormalizeListQuery(q)
-	if q.Status != "" && !domainpromotion.ValidStatus(q.Status) {
-		return nil, 0, domain.NewValidationError("status", "must be one of: draft, published, archived")
+	if !validListStatus(q.Status) {
+		return nil, 0, domain.NewValidationError("status", "must be one of: public, unpublic, draft, published, archived")
 	}
 	if q.Placement != "" && !domainpromotion.ValidPlacement(q.Placement) {
 		return nil, 0, domain.NewValidationError("placement", "unknown placement")
@@ -119,6 +122,16 @@ func (u *usecase) List(ctx context.Context, q ListQuery) ([]domainpromotion.Prom
 		Page:        q.Page,
 		Limit:       q.Limit,
 	})
+}
+
+// validListStatus accepts the stored lifecycle statuses and the two values the
+// promotions table offers: public (published) and unpublic (everything else).
+func validListStatus(s string) bool {
+	switch s {
+	case "", "public", "unpublic":
+		return true
+	}
+	return domainpromotion.ValidStatus(s)
 }
 
 // NormalizeListQuery trims the filters and clamps paging. List applies it too,
@@ -304,6 +317,26 @@ func (u *usecase) Publish(ctx context.Context, actor domain.Actor, id string) (*
 		return nil, nil, err
 	}
 	return existing, append(warnings, bannerWarnings...), nil
+}
+
+// Unpublish moves a published promotion back to draft so it disappears from the
+// LINE app. The UI shows draft as "unpublic".
+func (u *usecase) Unpublish(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error) {
+	existing, err := u.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if existing.Status != domainpromotion.StatusPublished {
+		return nil, domain.ErrConflict
+	}
+	existing.Status = domainpromotion.StatusDraft
+	existing.UpdatedBy = actor.ERPUserID
+	existing.UpdatedByEmail = actor.Email
+	existing.UpdatedAt = u.now()
+	if err := u.repo.Update(ctx, existing); err != nil {
+		return nil, err
+	}
+	return existing, nil
 }
 
 func (u *usecase) Archive(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error) {

@@ -22,6 +22,16 @@ func validStatus(s string) bool {
 	return false
 }
 
+// validListStatus accepts the stored lifecycle statuses plus the coupons
+// table's two states: public (active) and unpublic (everything else).
+func validListStatus(s string) bool {
+	switch s {
+	case "public", "unpublic":
+		return true
+	}
+	return validStatus(s)
+}
+
 func validHolderStatus(s string) bool {
 	switch s {
 	case domaincoupon.HolderAvailable, domaincoupon.HolderUsed, domaincoupon.HolderExpired, domaincoupon.HolderCancelled:
