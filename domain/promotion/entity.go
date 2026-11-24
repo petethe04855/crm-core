@@ -187,8 +187,11 @@ type Repository interface {
 	// "more than 5 home banners at once" warning.
 	CountPublishedOverlapping(ctx context.Context, placement string, start, end time.Time, excludeID string) (int64, error)
 	// ListLive returns published promotions of one placement whose window
-	// contains now, ordered by priority (highest first).
+	// contains now, in LINE OA display order (see DisplayOrderSQL).
 	ListLive(ctx context.Context, placement string, now time.Time) ([]Promotion, error)
+	// FindByPriority returns a non-archived promotion other than excludeID that
+	// holds display position priority, or nil when the position is free.
+	FindByPriority(ctx context.Context, priority int, excludeID string) (*Promotion, error)
 }
 
 // ValidPlacement reports whether p is a known placement.
@@ -216,4 +219,23 @@ func ValidStatus(s string) bool {
 		return true
 	}
 	return false
+}
+
+// DisplayOrderSQL is the ORDER BY for the LINE OA display order: Priority is a
+// position, so 1, 2, 3 … show first and 0 (not set) goes after them; ties fall
+// back to the earliest start, then the id.
+const DisplayOrderSQL = "priority = 0 ASC, priority ASC, display_start_at ASC, id ASC"
+
+// DisplayOrderLess is DisplayOrderSQL for promotions already in memory.
+func DisplayOrderLess(a, b Promotion) bool {
+	if (a.Priority == 0) != (b.Priority == 0) {
+		return a.Priority != 0
+	}
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	if !a.DisplayStartAt.Equal(b.DisplayStartAt) {
+		return a.DisplayStartAt.Before(b.DisplayStartAt)
+	}
+	return a.ID < b.ID
 }

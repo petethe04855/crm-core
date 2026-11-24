@@ -84,8 +84,8 @@ func TestPromotionRepositoryFindAllFiltersAndOrder(t *testing.T) {
 	all, total, err := repo.FindAll(ctx, domainpromotion.Query{Page: 1, Limit: 20})
 	require.NoError(t, err)
 	require.EqualValues(t, 4, total)
-	require.Equal(t, []string{"b", "c", "a", "d"}, []string{all[0].ID, all[1].ID, all[2].ID, all[3].ID},
-		"priority desc, then start asc")
+	require.Equal(t, []string{"a", "c", "b", "d"}, []string{all[0].ID, all[1].ID, all[2].ID, all[3].ID},
+		"display order 1, 5, 10, then the unset (0) one")
 
 	published, total, err := repo.FindAll(ctx, domainpromotion.Query{Status: domainpromotion.StatusPublished, Page: 1, Limit: 20})
 	require.NoError(t, err)
@@ -116,12 +116,28 @@ func TestPromotionRepositoryFindAllFiltersAndOrder(t *testing.T) {
 	require.EqualValues(t, 3, total, "the December promotion is outside November")
 	require.NotContains(t, []string{found[0].ID, found[1].ID, found[2].ID}, "d")
 
+	// FindByPriority finds who holds a display position, skipping excludeID
+	// and archived rows.
+	holder, err := repo.FindByPriority(ctx, 5, "")
+	require.NoError(t, err)
+	require.Equal(t, "c", holder.ID)
+	holder, err = repo.FindByPriority(ctx, 5, "c")
+	require.NoError(t, err)
+	require.Nil(t, holder)
+	items[3].Priority = 7
+	require.NoError(t, repo.Update(ctx, items[3]))
+	holder, err = repo.FindByPriority(ctx, 7, "")
+	require.NoError(t, err)
+	require.Nil(t, holder, "archived promotions do not hold a position")
+	items[3].Priority = 0
+	require.NoError(t, repo.Update(ctx, items[3]))
+
 	// Paging keeps the total and returns the requested slice.
 	page2, total, err := repo.FindAll(ctx, domainpromotion.Query{Page: 2, Limit: 2})
 	require.NoError(t, err)
 	require.EqualValues(t, 4, total)
 	require.Len(t, page2, 2)
-	require.Equal(t, "a", page2[0].ID)
+	require.Equal(t, "b", page2[0].ID)
 }
 
 func TestPromotionRepositoryCountOverlappingAndListLive(t *testing.T) {

@@ -65,6 +65,9 @@ type CTATargetChecker interface {
 	Validate(ctx context.Context, ctaType, target string, start, end time.Time) (warning string, err error)
 }
 
+// MaxPriority is the highest display order the back office accepts.
+const MaxPriority = 9999
+
 // Usecase is the promotion business logic.
 type Usecase interface {
 	List(ctx context.Context, q ListQuery) ([]domainpromotion.Promotion, int64, error)
@@ -78,8 +81,12 @@ type Usecase interface {
 	Unpublish(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error)
 	Archive(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error)
 	Duplicate(ctx context.Context, actor domain.Actor, id string) (*domainpromotion.Promotion, error)
+	// SetPriority changes only the LINE OA display position (1 first, 0 = not
+	// set, shown last), so the list
+	// screen can reorder rows without resending the whole form.
+	SetPriority(ctx context.Context, actor domain.Actor, id string, priority int) (*domainpromotion.Promotion, error)
 	// ActiveFor is the LINE feed: live promotions of one placement that match
-	// the member's audience, highest priority first.
+	// the member's audience, in display order (1 first, 0 = not set last).
 	ActiveFor(ctx context.Context, member domainpromotion.MemberFacts, placement string, now time.Time) ([]domainpromotion.Promotion, error)
 }
 
@@ -184,6 +191,9 @@ func (u *usecase) Create(ctx context.Context, actor domain.Actor, in Input) (*do
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := u.ensurePriorityFree(ctx, clean.Priority, ""); err != nil {
+		return nil, nil, err
+	}
 	now := u.now()
 	p := &domainpromotion.Promotion{
 		ID:             u.newID(),
@@ -237,6 +247,12 @@ func (u *usecase) Update(ctx context.Context, actor domain.Actor, id string, in 
 			!clean.DisplayStartAt.Equal(existing.DisplayStartAt) &&
 			clean.DisplayStartAt.Before(now) {
 			return nil, nil, domain.NewValidationError("displayStartAt", "must not move into the past while the promotion is live")
+		}
+	}
+
+	if clean.Priority != existing.Priority {
+		if err := u.ensurePriorityFree(ctx, clean.Priority, existing.ID); err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -348,6 +364,8 @@ func (u *usecase) Archive(ctx context.Context, actor domain.Actor, id string) (*
 		return nil, domain.NewValidationError("status", "only a published promotion can be archived")
 	}
 	existing.Status = domainpromotion.StatusArchived
+	// An archived promotion never shows in LINE OA; free its position.
+	existing.Priority = 0
 	existing.UpdatedBy = actor.ERPUserID
 	existing.UpdatedByEmail = actor.Email
 	existing.UpdatedAt = u.now()
@@ -366,6 +384,8 @@ func (u *usecase) Duplicate(ctx context.Context, actor domain.Actor, id string) 
 	copy := *source
 	copy.ID = u.newID()
 	copy.Title = duplicateTitle(source.Title)
+	// Display positions are unique; the copy starts without one.
+	copy.Priority = 0
 	copy.Status = domainpromotion.StatusDraft
 	copy.CreatedBy = actor.ERPUserID
 	copy.CreatedByEmail = actor.Email
@@ -377,6 +397,33 @@ func (u *usecase) Duplicate(ctx context.Context, actor domain.Actor, id string) 
 		return nil, err
 	}
 	return &copy, nil
+}
+
+func (u *usecase) SetPriority(ctx context.Context, actor domain.Actor, id string, priority int) (*domainpromotion.Promotion, error) {
+	if priority < 0 || priority > MaxPriority {
+		return nil, domain.NewValidationError("priority", fmt.Sprintf("must be between 0 and %d", MaxPriority))
+	}
+	existing, err := u.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if existing.Status == domainpromotion.StatusArchived {
+		return nil, domain.ErrConflict
+	}
+	if priority == existing.Priority {
+		return existing, nil
+	}
+	if err := u.ensurePriorityFree(ctx, priority, existing.ID); err != nil {
+		return nil, err
+	}
+	existing.Priority = priority
+	existing.UpdatedBy = actor.ERPUserID
+	existing.UpdatedByEmail = actor.Email
+	existing.UpdatedAt = u.now()
+	if err := u.repo.Update(ctx, existing); err != nil {
+		return nil, err
+	}
+	return existing, nil
 }
 
 func (u *usecase) ActiveFor(ctx context.Context, member domainpromotion.MemberFacts, placement string, now time.Time) ([]domainpromotion.Promotion, error) {
@@ -398,6 +445,22 @@ func (u *usecase) ActiveFor(ctx context.Context, member domainpromotion.MemberFa
 		}
 	}
 	return out, nil
+}
+
+// ensurePriorityFree rejects a display position (1…MaxPriority) that another
+// non-archived promotion already holds. 0 means "not set" and may repeat.
+func (u *usecase) ensurePriorityFree(ctx context.Context, priority int, excludeID string) error {
+	if priority == 0 {
+		return nil
+	}
+	taken, err := u.repo.FindByPriority(ctx, priority, excludeID)
+	if err != nil {
+		return err
+	}
+	if taken != nil {
+		return domain.NewValidationError("", fmt.Sprintf("ลำดับ %d ถูกใช้แล้วโดย \"%s\"", priority, taken.Title))
+	}
+	return nil
 }
 
 // bannerWarnings reports when more than maxHomeBanners home banners overlap.

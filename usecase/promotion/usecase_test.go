@@ -48,15 +48,7 @@ func (f *fakeRepo) FindAll(_ context.Context, q domainpromotion.Query) ([]domain
 		}
 		out = append(out, p)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Priority != out[j].Priority {
-			return out[i].Priority > out[j].Priority
-		}
-		if !out[i].DisplayStartAt.Equal(out[j].DisplayStartAt) {
-			return out[i].DisplayStartAt.Before(out[j].DisplayStartAt)
-		}
-		return out[i].ID < out[j].ID
-	})
+	sort.Slice(out, func(i, j int) bool { return domainpromotion.DisplayOrderLess(out[i], out[j]) })
 	total := int64(len(out))
 	from := (q.Page - 1) * q.Limit
 	if from > len(out) {
@@ -75,6 +67,21 @@ func (f *fakeRepo) FindByID(_ context.Context, id string) (*domainpromotion.Prom
 		return nil, domain.ErrNotFound
 	}
 	return &p, nil
+}
+
+func (f *fakeRepo) FindByPriority(_ context.Context, priority int, excludeID string) (*domainpromotion.Promotion, error) {
+	ids := make([]string, 0, len(f.items))
+	for id := range f.items {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := f.items[id]
+		if p.Priority == priority && id != excludeID && p.Status != domainpromotion.StatusArchived {
+			return &p, nil
+		}
+	}
+	return nil, nil
 }
 
 func (f *fakeRepo) Create(_ context.Context, p *domainpromotion.Promotion) error {
@@ -122,7 +129,7 @@ func (f *fakeRepo) ListLive(_ context.Context, placement string, now time.Time) 
 			out = append(out, p)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Priority > out[j].Priority })
+	sort.Slice(out, func(i, j int) bool { return domainpromotion.DisplayOrderLess(out[i], out[j]) })
 	return out, nil
 }
 
@@ -423,6 +430,52 @@ func TestDuplicateIsADraftCopyWithSuffix(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrNotFound)
 }
 
+func TestSetPriorityChangesOnlyTheOrder(t *testing.T) {
+	uc, _, clock := newTestUsecase()
+	ctx := context.Background()
+
+	p, _, err := uc.Create(ctx, testActor, validInput(clock))
+	require.NoError(t, err)
+	_, _, err = uc.Publish(ctx, testActor, p.ID)
+	require.NoError(t, err)
+
+	got, err := uc.SetPriority(ctx, testActor, p.ID, 42)
+	require.NoError(t, err)
+	require.Equal(t, 42, got.Priority)
+	require.Equal(t, domainpromotion.StatusPublished, got.Status)
+	require.Equal(t, p.Title, got.Title)
+
+	_, err = uc.SetPriority(ctx, testActor, p.ID, -1)
+	requireValidationField(t, err, "priority")
+	_, err = uc.SetPriority(ctx, testActor, p.ID, MaxPriority+1)
+	requireValidationField(t, err, "priority")
+	_, err = uc.SetPriority(ctx, testActor, "missing", 1)
+	require.ErrorIs(t, err, domain.ErrNotFound)
+
+	// Positions are unique among non-archived promotions; 0 (not set) repeats.
+	otherIn := validInput(clock)
+	otherIn.Title = "อีกโปร"
+	other, _, err := uc.Create(ctx, testActor, otherIn)
+	require.NoError(t, err)
+	_, err = uc.SetPriority(ctx, testActor, other.ID, 42)
+	require.ErrorIs(t, err, domain.ErrValidation)
+	require.Contains(t, err.Error(), "ลำดับ 42")
+	_, err = uc.SetPriority(ctx, testActor, other.ID, 0)
+	require.NoError(t, err)
+
+	copied, err := uc.Duplicate(ctx, testActor, p.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, copied.Priority, "a copy does not take the source's position")
+
+	archived, err := uc.Archive(ctx, testActor, p.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, archived.Priority, "archiving frees the position")
+	_, err = uc.SetPriority(ctx, testActor, other.ID, 42)
+	require.NoError(t, err)
+	_, err = uc.SetPriority(ctx, testActor, p.ID, 1)
+	require.ErrorIs(t, err, domain.ErrConflict)
+}
+
 func TestHomeBannerWarningsAfterFiveOverlaps(t *testing.T) {
 	uc, repo, clock := newTestUsecase()
 	ctx := context.Background()
@@ -458,12 +511,12 @@ func TestActiveForFiltersPlacementTimeAndAudience(t *testing.T) {
 
 	repo.items["all"] = domainpromotion.Promotion{
 		ID: "all", Title: "ทุกคน", Status: domainpromotion.StatusPublished,
-		Placement: domainpromotion.PlacementHomeBanner, Priority: 1,
+		Placement: domainpromotion.PlacementHomeBanner, Priority: 2,
 		DisplayStartAt: now.Add(-time.Hour), DisplayEndAt: now.Add(time.Hour),
 	}
 	repo.items["gold"] = domainpromotion.Promotion{
 		ID: "gold", Title: "Gold", Status: domainpromotion.StatusPublished,
-		Placement: domainpromotion.PlacementHomeBanner, Priority: 10,
+		Placement: domainpromotion.PlacementHomeBanner, Priority: 1,
 		Audience:       domainpromotion.Audience{Tiers: []string{"gold"}},
 		DisplayStartAt: now.Add(-time.Hour), DisplayEndAt: now.Add(time.Hour),
 	}
@@ -493,7 +546,7 @@ func TestActiveForFiltersPlacementTimeAndAudience(t *testing.T) {
 	goldOld := domainpromotion.MemberFacts{TierCode: "gold", RegisteredAt: now.AddDate(0, 0, -100)}
 	got, err := uc.ActiveFor(context.Background(), goldOld, domainpromotion.PlacementHomeBanner, now)
 	require.NoError(t, err)
-	require.Equal(t, []string{"gold", "all"}, promotionIDs(got), "priority order, audience matched")
+	require.Equal(t, []string{"gold", "all"}, promotionIDs(got), "display order (1 before 2), audience matched")
 
 	bronzeNew := domainpromotion.MemberFacts{TierCode: "bronze", RegisteredAt: now.AddDate(0, 0, -1)}
 	got, err = uc.ActiveFor(context.Background(), bronzeNew, domainpromotion.PlacementHomeBanner, now)

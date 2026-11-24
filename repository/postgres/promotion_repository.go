@@ -53,7 +53,7 @@ func (r *promotionRepository) FindAll(ctx context.Context, q domainpromotion.Que
 	}
 
 	var promotions []domainpromotion.Promotion
-	err := tx.Order("priority DESC").Order("display_start_at ASC").Order("id ASC").
+	err := tx.Order(domainpromotion.DisplayOrderSQL).
 		Offset((q.Page - 1) * q.Limit).Limit(q.Limit).
 		Find(&promotions).Error
 	if err != nil {
@@ -71,6 +71,17 @@ func (r *promotionRepository) FindByID(ctx context.Context, id string) (*domainp
 		return nil, err
 	}
 	return &p, nil
+}
+
+func (r *promotionRepository) FindByPriority(ctx context.Context, priority int, excludeID string) (*domainpromotion.Promotion, error) {
+	var found []domainpromotion.Promotion
+	err := r.db.WithContext(ctx).
+		Where("priority = ? AND id <> ? AND status <> ?", priority, excludeID, domainpromotion.StatusArchived).
+		Order("id ASC").Limit(1).Find(&found).Error
+	if err != nil || len(found) == 0 {
+		return nil, err
+	}
+	return &found[0], nil
 }
 
 func (r *promotionRepository) Create(ctx context.Context, p *domainpromotion.Promotion) error {
@@ -112,7 +123,7 @@ func (r *promotionRepository) ListLive(ctx context.Context, placement string, no
 	err := r.db.WithContext(ctx).
 		Where("status = ? AND placement = ?", domainpromotion.StatusPublished, placement).
 		Where("display_start_at <= ? AND display_end_at > ?", now, now).
-		Order("priority DESC").Order("display_start_at ASC").Order("id ASC").
+		Order(domainpromotion.DisplayOrderSQL).
 		Find(&promotions).Error
 	return promotions, err
 }
